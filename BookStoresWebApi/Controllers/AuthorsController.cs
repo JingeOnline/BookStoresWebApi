@@ -10,16 +10,22 @@ namespace BookStoresWebApi.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
-    public class AuthorController : ControllerBase
+    public class AuthorsController : ControllerBase
     {
+        private readonly BookStoresDBContext _context;
+        public AuthorsController(BookStoresDBContext context)
+        {
+            this._context = context;
+        }
+
         [HttpGet]
         public IEnumerable<Author> Get()
         {
-            using (var context=new BookStoresDBContext())
-            {
-                //返回所有作者
-                return context.Authors.ToList();
-            }
+
+
+            //返回所有作者
+            return _context.Authors.ToList();
+
         }
     }
 }
