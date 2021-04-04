@@ -7,6 +7,12 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using BookStoresWebApi.Models;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.Options;
+using System.IdentityModel.Tokens.Jwt;
+using System.Text;
+using Microsoft.IdentityModel.Tokens;
+using System.Security.Claims;
+using System.Security.Cryptography;
 
 namespace BookStoresWebApi.Controllers
 {
@@ -16,10 +22,12 @@ namespace BookStoresWebApi.Controllers
     public class UsersController : ControllerBase
     {
         private readonly BookStoresDBContext _context;
+        private readonly JWTSettings _jwtSettings;
 
-        public UsersController(BookStoresDBContext context)
+        public UsersController(BookStoresDBContext context, IOptions<JWTSettings> jwtSettings)
         {
             _context = context;
+            _jwtSettings = jwtSettings.Value;
         }
 
         // GET: api/Users
@@ -44,21 +52,82 @@ namespace BookStoresWebApi.Controllers
             return user;
         }
 
-        // GET: api/Users/Login
-        [Authorize]
-        [HttpGet("Login/")]
-        public async Task<ActionResult<User>> Login()
-        {
-            //通过Identity获取用户邮箱
-            string email = HttpContext.User.Identity.Name;
-            User user = await _context.Users.Where(u => u.EmailAddress == email).FirstOrDefaultAsync();
+        ////该方法是针对Basic Authentication的练习
+        //// GET: api/Users/Login
+        //[Authorize]
+        //[HttpGet("Login")]
+        //public async Task<ActionResult<User>> Login()
+        //{
+        //    //通过Identity获取用户邮箱
+        //    string email = HttpContext.User.Identity.Name;
+        //    User user = await _context.Users.Where(u => u.EmailAddress == email).FirstOrDefaultAsync();
 
-            if (user == null)
+        //    if (user == null)
+        //    {
+        //        return NotFound();
+        //    }
+
+        //    return user;
+        //}
+
+        //该方法是针对JWT的练习
+        // GET: api/Users/Login
+        [HttpPost("Login")]
+        public async Task<ActionResult<RefreshToken>> Login([FromBody]dynamic userInfo)
+        {
+            //这里使用dynamic动态类型传参，属性名必须和传入的json字符串的属性名完全一致，大小写敏感。否则，读取不到参数。
+            string email = userInfo.EmailAddress;
+            string pwd = userInfo.Password;
+            User validUser = await _context.Users
+                                        .Where(u => u.EmailAddress == email && u.Password == pwd)
+                                        .FirstOrDefaultAsync();
+
+            if (validUser == null)
             {
                 return NotFound();
             }
+            else
+            {
+                //TokenHandler负责创建Token
+                JwtSecurityTokenHandler tokenHandler = new JwtSecurityTokenHandler();
+                //获取密钥(密钥不能少于128bit也就是16bytes)
+                byte[] key = Encoding.UTF8.GetBytes(_jwtSettings.SecretKey);
+                //为了防止密钥过短可对原始密码进行MD5加密（MD5会固定输出128bit数据）
+                //key = MD5.Create().ComputeHash(key);
 
-            return user;
+                SecurityTokenDescriptor tokenDescriptor = new SecurityTokenDescriptor
+                {
+                    //定义Claims
+                    Subject =new ClaimsIdentity(new Claim[]
+                    {
+                        new Claim(ClaimTypes.Name,email)
+                    }),
+                    //定义过期时间
+                    Expires=DateTime.UtcNow.AddDays(1),
+                    //签署凭证
+                    //包含指定加密密钥和加密方法
+                    SigningCredentials=new SigningCredentials(new SymmetricSecurityKey(key)
+                                                ,SecurityAlgorithms.HmacSha256Signature)
+                };
+                //执行创建Token
+                SecurityToken token = tokenHandler.CreateToken(tokenDescriptor);
+
+                RefreshToken refreshToken = new RefreshToken()
+                {
+                    TokenId = 888,
+                    UserId = validUser.UserId,
+                    //把token序列化成字符串
+                    Token = tokenHandler.WriteToken(token),
+                    ExpiryDate =tokenDescriptor.Expires??DateTime.UtcNow
+                };
+                return refreshToken;
+            }
+        }
+
+        [HttpPost("test")]
+        public ActionResult Test([FromBody] string text)
+        {
+            return Ok(text);
         }
 
         // PUT: api/Users/5
