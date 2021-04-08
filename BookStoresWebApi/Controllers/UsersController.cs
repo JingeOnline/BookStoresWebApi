@@ -73,7 +73,7 @@ namespace BookStoresWebApi.Controllers
         //该方法是针对JWT的练习
         // GET: api/Users/Login
         [HttpPost("Login")]
-        public async Task<ActionResult<RefreshToken>> Login([FromBody]dynamic userInfo)
+        public async Task<ActionResult<Token>> Login([FromBody] dynamic userInfo)
         {
             //这里使用dynamic动态类型传参，属性名必须和传入的json字符串的属性名完全一致，大小写敏感。否则，读取不到参数。
             string email = userInfo.EmailAddress;
@@ -88,39 +88,135 @@ namespace BookStoresWebApi.Controllers
             }
             else
             {
-                //TokenHandler负责创建Token
-                JwtSecurityTokenHandler tokenHandler = new JwtSecurityTokenHandler();
-                //获取密钥(密钥不能少于128bit也就是16bytes)
-                byte[] key = Encoding.UTF8.GetBytes(_jwtSettings.SecretKey);
-                //为了防止密钥过短可对原始密码进行MD5加密（MD5会固定输出128bit数据）
-                //key = MD5.Create().ComputeHash(key);
+                RefreshToken refreshToken = createRefreshToken();
+                validUser.RefreshTokens.Add(refreshToken);
+                await _context.SaveChangesAsync();
 
-                SecurityTokenDescriptor tokenDescriptor = new SecurityTokenDescriptor
+                Token token = new Token
                 {
-                    //定义Claims
-                    Subject =new ClaimsIdentity(new Claim[]
-                    {
-                        new Claim(ClaimTypes.Name,email)
-                    }),
-                    //定义过期时间
-                    Expires=DateTime.UtcNow.AddDays(1),
-                    //签署凭证
-                    //包含指定加密密钥和加密方法
-                    SigningCredentials=new SigningCredentials(new SymmetricSecurityKey(key)
-                                                ,SecurityAlgorithms.HmacSha256Signature)
+                    JWT= createJWT(validUser.UserId),
+                    RefreshToken =refreshToken.Token,
                 };
-                //执行创建Token
-                SecurityToken token = tokenHandler.CreateToken(tokenDescriptor);
+                return token;
+            }
+        }
 
-                RefreshToken refreshToken = new RefreshToken()
+        [HttpPost("RefreshToken")]
+        public async Task<ActionResult<Token>> RefreshToken([FromBody] Token token)
+        {
+            User user = getUserFromJWT(token.JWT);
+            if (user!=null && validateRefreshToken(user, token.RefreshToken))
+            {
+                Token newToken = new Token
                 {
-                    TokenId = 888,
-                    UserId = validUser.UserId,
-                    //把token序列化成字符串
-                    Token = tokenHandler.WriteToken(token),
-                    ExpiryDate =tokenDescriptor.Expires??DateTime.UtcNow
+                    JWT = createJWT(user.UserId),
+                    RefreshToken = token.RefreshToken,
                 };
-                return refreshToken;
+                return newToken;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        private RefreshToken createRefreshToken()
+        {
+            RefreshToken refreshToken = new RefreshToken();
+            byte[] randomNumber = new byte[32];
+            using (RandomNumberGenerator random = RandomNumberGenerator.Create())
+            {
+                //生成一组随机数并写入到字节数组中
+                random.GetBytes(randomNumber);
+                refreshToken.Token = Convert.ToBase64String(randomNumber);
+            }
+            refreshToken.ExpiryDate = DateTime.UtcNow.AddDays(7);
+            return refreshToken;
+        }
+
+        private string createJWT(int userId)
+        {
+            //TokenHandler负责创建Token
+            JwtSecurityTokenHandler tokenHandler = new JwtSecurityTokenHandler();
+            //获取密钥(密钥不能少于128bit也就是16bytes)
+            byte[] key = Encoding.UTF8.GetBytes(_jwtSettings.SecretKey);
+            //为了防止密钥过短可对原始密码进行MD5加密（MD5会固定输出128bit数据）
+            //key = MD5.Create().ComputeHash(key);
+
+            SecurityTokenDescriptor tokenDescriptor = new SecurityTokenDescriptor
+            {
+                //定义Claims
+                Subject = new ClaimsIdentity(new Claim[]
+                {
+                        //new Claim(ClaimTypes.Name,email)
+                        //此处使用UserId作为Claim名称
+                        new Claim(ClaimTypes.Name,Convert.ToString(userId))
+                }),
+                //定义过期时间
+                Expires = DateTime.UtcNow.AddSeconds(30),
+                //签署凭证
+                //包含指定加密密钥和加密方法
+                SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key)
+                                            , SecurityAlgorithms.HmacSha256Signature)
+            };
+            //执行创建Token
+            SecurityToken securityToken = tokenHandler.CreateToken(tokenDescriptor);
+            //把JWT对象序列化成JWT字符串
+            string JWT = tokenHandler.WriteToken(securityToken);
+
+            return JWT;
+        }
+
+        //验证JWT AccessToken字符串，并获取对应的User
+        //此处再次验证AccessToken貌似没有必要
+        private User getUserFromJWT(string jwt)
+        {
+            //TokenHandler负责创建Token
+            JwtSecurityTokenHandler tokenHandler = new JwtSecurityTokenHandler();
+            //获取密钥(密钥不能少于128bit也就是16bytes)
+            byte[] key = Encoding.UTF8.GetBytes(_jwtSettings.SecretKey);
+
+            TokenValidationParameters tokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(key),
+                ValidateIssuer = false,
+                ValidateAudience = false,
+                //ClockSkew=TimeSpan.Zero,
+            };
+            SecurityToken securityToken;
+
+            //根据验证规则来验证JWT
+            ClaimsPrincipal claimsPrincipal= tokenHandler.ValidateToken(jwt, tokenValidationParameters, out securityToken);
+            JwtSecurityToken jwtSecurityToken = securityToken as JwtSecurityToken;
+
+            if(jwtSecurityToken!=null && 
+                jwtSecurityToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
+            {
+                string userId = claimsPrincipal.FindFirst(ClaimTypes.Name)?.Value;
+                User user=_context.Users.Where(u => u.UserId == Convert.ToInt32(userId)).FirstOrDefault();
+                return user;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        //去数据库中验证RefreshToken是否与User对应，并且没有过期
+        private bool validateRefreshToken(User user, string refreshToken)
+        {
+            RefreshToken rt = _context.RefreshTokens
+                                .Where(rt => rt.Token == refreshToken)
+                                .OrderByDescending(rt => rt.ExpiryDate)
+                                .FirstOrDefault();
+            if(rt!=null && rt.UserId==user.UserId && rt.ExpiryDate>DateTime.UtcNow)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
             }
         }
 
